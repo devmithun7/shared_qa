@@ -55,6 +55,22 @@ It skips null keys and keys missing from the dimension, so use it together with:
 * `dbt_expectations.expect_column_values_to_not_be_null` for null keys
 * `dbt_utils.relationships_where` for keys that don't exist
 
+## Unit tests
+
+Test transformation logic, such as deduplication, source priority and calculations, with [dbt unit tests](https://docs.getdbt.com/docs/build/unit-tests), not pytest. A unit test gives the model fixed input rows for each source or ref it reads, runs the model's SQL on your warehouse and compares the output with the expected rows. Inputs and expected outputs can be written in YAML or kept as CSV files in `tests/fixtures/`.
+
+Run unit tests only in development and CI. dbt Labs recommends this because their inputs are static, so running them in production uses compute without adding any assurance. Leave them out of production runs with:
+
+```bash
+dbt build --exclude-resource-type unit_test
+```
+
+## Contracts on Trino
+
+The Trino adapter (dbt-trino 1.11) enforces only the `not_null` constraint. `unique`, `primary_key`, `foreign_key` and `check` constraints are not supported, so uniqueness, referential integrity and value rules must stay as data tests.
+
+[Constraints](https://docs.getdbt.com/reference/resource-properties/constraints) only work on `table` and `incremental` models, never on views or ephemeral models. Contracts on incremental models need `on_schema_change` set to `append_new_columns` or `fail`.
+
 ## Adding a test
 
 1. Use a [dbt_expectations](https://github.com/metaplane/dbt-expectations) test if one covers the check.
