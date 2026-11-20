@@ -57,8 +57,8 @@ It skips null keys and keys missing from the dimension, so use it together with:
 
 ## Adding a test
 
-1. Use a dbt_expectations test if one covers the check.
-2. If not, use dbt_utils.
+1. Use a [dbt_expectations](https://github.com/metaplane/dbt-expectations) test if one covers the check.
+2. If not, use [dbt_utils](https://github.com/dbt-labs/dbt-utils).
 3. Only if neither has it, add a custom test under `macros/tests/`.
 
 ## Versions
