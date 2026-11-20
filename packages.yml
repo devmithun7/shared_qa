@@ -1,0 +1,12 @@
+# Ranges, not exact pins. Every domain project installs this package, and an
+# exact pin here would clash with any project that pins a different version.
+# Domain projects lock exact versions in their own package-lock.yml.
+#
+# Tested with dbt_expectations 0.10.10 and dbt_utils 1.4.1.
+
+packages:
+  - package: metaplane/dbt_expectations
+    version: [">=0.10.0", "<0.11.0"]
+
+  - package: dbt-labs/dbt_utils
+    version: [">=1.3.0", "<2.0.0"]

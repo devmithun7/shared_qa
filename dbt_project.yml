@@ -1,0 +1,16 @@
+name: shared_qa
+version: "0.2.0"
+config-version: 2
+
+# Test arguments go under arguments:, which needs dbt 1.10 or later.
+require-dbt-version: [">=1.10.0", "<2.0.0"]
+
+# This package only ships tests (macros). Domain projects own their models.
+macro-paths: ["macros"]
+model-paths: []
+seed-paths: []
+snapshot-paths: []
+analysis-paths: []
+test-paths: []
+
+clean-targets: ["target", "dbt_packages"]
