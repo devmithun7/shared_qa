@@ -14,8 +14,8 @@ The framework will provide a **versioned dbt package, documented test catalogue 
 | Component | Purpose |
 |---|---|
 | **Reusable test package** | Use **`dbt_utils` and `dbt_expectations` as the primary libraries for reusable data tests**. When an applicable test is unavailable in either package, implement a custom test. Reusable custom checks will be included in the shared package. |
-| **Test catalogue** | Document each test’s purpose, parameters, applicable layers, expected result and limitations. |
-| **Configuration guidance** | Explain how to configure models, columns, keys, comparison filters, time windows, tolerances and severity. |
+| **Test catalogue** | Document each **custom** test’s purpose, parameters, applicable layers, expected result and limitations. Tests from `dbt_expectations` and `dbt_utils` are documented by those libraries. See the [custom test catalogue](#custom-test-catalogue). |
+| **Configuration guidance** | Explain how to configure each **custom** test: models, columns, keys, comparison filters, time windows, tolerances and severity. |
 | **Execution and reporting standards** | Define when checks run, how failures are reported and how execution history is retained. |
 
 Choose one implementation when multiple packages offer equivalent checks for the same requirement.
@@ -136,6 +136,166 @@ Assign each business rule a **primary testing layer**, normally where its logic 
 - Validate downstream record preservation and reconciliation where needed, without repeating the original calculation test.
 
 This approach follows dbt’s guidance to focus testing on new transformations and risks while avoiding equivalent checks on unchanged attributes. See [dbt guidance on test placement](https://docs.getdbt.com/blog/test-smarter-where-tests-should-go).
+
+## Custom test catalogue
+
+These are the framework's own tests, for checks that neither dbt_expectations nor dbt_utils covers. Tests from those two libraries are documented by the libraries themselves. The tests live in the [shared_qa package](https://github.com/devmithun7/shared_qa).
+
+None of the custom tests report null keys, or keys missing from the other model. Pair each one with `dbt_expectations.expect_column_values_to_not_be_null` and `dbt_utils.relationships_where`, so every problem shows up in exactly one test.
+
+Each test was checked on dbt 1.10 and 1.11: it passes on correct data and catches planted defects, with the exact number of failing rows expected. All four compile to valid Trino SQL.
+
+### relationships_multi_column
+
+**Purpose:** checks that a combination of columns, such as account and month, exists in another model. `dbt_utils.relationships_where` only checks one column.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `columns` | yes | Key columns in the tested model, as a list |
+| `to` | yes | The other model |
+| `fields` | yes | Matching columns in the other model, as a list in the same order |
+| `from_condition` | no | Filter on the tested model. Default: all rows |
+| `to_condition` | no | Filter on the other model. Default: all rows |
+
+**Applicable layers:** facts and aggregates that link to another model on more than one column.
+
+**Expected result:** passes when every key combination in the tested model has a match. Each failing row shows the unmatched key values as `key_1`, `key_2` and so on, in column order.
+
+**Limitations:** rows where any key column is null are skipped. The column and field lists must be the same length, or the test fails to compile.
+
+**Configuration:** add it at model level. Use `to_condition` when the match has to land on a specific kind of row.
+
+```yaml
+models:
+  - name: fact_commercial_monthly
+    data_tests:
+      - shared_qa.relationships_multi_column:
+          arguments:
+            columns: [account_id, revenue_month]
+            to: ref('fact_revenue_monthly')
+            fields: [account_id, revenue_month]
+            to_condition: "is_commercial_fl = 'Y'"
+          config:
+            tags: [baseline]
+```
+
+### sum_not_greater_than
+
+**Purpose:** for each group, checks that the sum of a column is not more than a limit, such as the amounts applied to invoices against the payment amount. dbt_expectations can only check that totals are equal, or that they sit between fixed numbers.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `group_by` | yes | Columns that define a group, as a list |
+| `limit_column` | yes | Column holding the limit |
+| `limit_model` | no | Model holding the limit. Default: the tested model |
+| `limit_group_by` | no | Group columns in `limit_model`. Default: same as `group_by` |
+| `limit_aggregate` | no | How limit rows in a group are combined: `max`, `min` or `sum`. Default `max` |
+| `row_condition` | no | Filter on the tested model |
+| `limit_row_condition` | no | Filter on `limit_model` |
+| `tolerance` | no | Allowed overshoot for rounding. Default `0` |
+
+**Applicable layers:** facts, and aggregates built from them.
+
+**Expected result:** passes when no group's total is more than its limit plus the tolerance. Each failing row shows the group keys, the total and the limit.
+
+**Limitations:** groups that have no limit row are not reported. Group keys are matched null safe, so a null key is compared like any other value instead of failing by mistake.
+
+**Configuration:** add it to the column being summed. When the limit is repeated on every row, as with a payment amount on each payment and invoice row, keep the default `max`. When the limit is spread over several rows, use `sum`. Use a small tolerance for amounts that are split and rounded.
+
+```yaml
+models:
+  - name: fact_payment
+    columns:
+      - name: applied_amount
+        data_tests:
+          - shared_qa.sum_not_greater_than:
+              arguments:
+                group_by: [payment_id]
+                limit_column: payment_amount
+                tolerance: 0.01
+              config:
+                tags: [reconciliation]
+                severity: warn
+```
+
+### value_in_matched_range
+
+**Purpose:** checks that the row a key points at has a range that contains this row's value. For SCD2 dimensions, it proves a fact picked the version that was valid at the time of the event. A normal relationship test misses this, because the wrong version's key still exists. For numeric ranges, it proves a value sits inside its matched range, such as a contact count inside its rate tier.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `to` | yes | The model holding the ranges |
+| `field` | yes | The key column in that model |
+| `value_column` | yes | Column or expression in the tested model that must fall inside the range |
+| `lower_bound_column` | no | Range start. Default `valid_from` |
+| `upper_bound_column` | no | Range end. Default `valid_to` |
+| `upper_bound_inclusive` | no | `true` when the end value belongs to the range. Default `false` |
+
+**Applicable layers:** facts that join to an SCD2 dimension, and any model that looks a value up in a table of ranges, such as rate tiers or discount windows.
+
+**Expected result:** passes when every value falls inside its matched range. The range is `start <= value < end`, or `start <= value <= end` with `upper_bound_inclusive: true`. Each failing row shows the key, the value and the range it should have fallen into.
+
+**Limitations:** null keys and null values are skipped. A null bound means that side of the range is open, so a null `valid_to` means the version is still current.
+
+**Configuration:** add it to the key column. SCD2 versions usually end exactly when the next one starts, so keep the default exclusive end. Tiers written as 0 to 500 and 501 to 2,500 include their end value, so set `upper_bound_inclusive: true`. If the two sides store time with different types, pass an expression such as `"cast(invoice_month as timestamp)"` as `value_column`.
+
+```yaml
+models:
+  - name: fact_invoice_line
+    columns:
+      - name: customer_sk
+        data_tests:
+          - shared_qa.value_in_matched_range:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_sk
+                value_column: invoice_at
+              config:
+                tags: [scd2]
+      - name: rate_tier_sk
+        data_tests:
+          - shared_qa.value_in_matched_range:
+              arguments:
+                to: ref('dim_rate_tier')
+                field: rate_tier_sk
+                value_column: contact_count
+                lower_bound_column: min_contacts
+                upper_bound_column: max_contacts
+                upper_bound_inclusive: true
+```
+
+### hierarchy_reaches_root
+
+**Purpose:** for a table where each row points at its parent, checks that no node is part of a loop, and that every node reaches a top level node within a set number of levels. Neither library can walk a hierarchy.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `parent_column` | yes | Column holding the parent id |
+| `root_condition` | no | When a node has no parent. Default: the parent is null |
+| `max_depth` | no | Most levels allowed above a node. Default `10` |
+
+**Applicable layers:** dimensions and intermediate models that hold a parent and child structure, such as a partner hierarchy.
+
+**Expected result:** passes when every node reaches the top within `max_depth` levels. Each failing row shows the node and the problem: `part of a loop`, or `no top level node within N levels`. A node sitting under a loop gets the second message.
+
+**Limitations:** node ids must be unique, so add a uniqueness test. A parent that doesn't exist as a node counts as reaching the top, so check parents with a relationship test. The walk is written as one join per level instead of a recursive query, so it runs on Trino, but a very large `max_depth` means a longer query.
+
+**Configuration:** add it to the node id column. Use `root_condition` when top level nodes carry a placeholder parent such as `'-1'`. Set `max_depth` to the depth cap of any hierarchy walk built on this table. The test then fails when the walk would cut a branch short.
+
+```yaml
+models:
+  - name: dim_partner
+    columns:
+      - name: partner_id
+        data_tests:
+          - shared_qa.hierarchy_reaches_root:
+              arguments:
+                parent_column: parent_partner_id
+                root_condition: "parent_partner_id is null or parent_partner_id = '-1'"
+                max_depth: 4
+              config:
+                tags: [baseline]
+```
 
 ## Recommendations to consider
 
